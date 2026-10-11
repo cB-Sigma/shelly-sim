@@ -61,9 +61,34 @@ func TestRunner(t *testing.T) {
 }
 
 func TestRunnerFlags(t *testing.T) {
-	for _, args := range [][]string{{"-coiot", "nowhere:x"}, {"-coiot", "127.0.0.1:5683", "-interval", "0s"}, {"-bogus"}, {"extra"}} {
+	for _, args := range [][]string{{"-coiot", "nowhere:x"}, {"-coiot", "127.0.0.1:5683", "-interval", "0s"}, {"-bogus"}, {"extra"}, {"-mqtt", "127.0.0.1:1"}} {
 		if err := run(context.Background(), args, &bytes.Buffer{}, nil); err == nil {
 			t.Errorf("%v accepted", args)
 		}
+	}
+}
+
+func TestRunnerAll(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	got := make(chan *sim.Sim, 1)
+	done := make(chan error, 1)
+	var out bytes.Buffer
+	go func() { done <- run(ctx, []string{"-all"}, &out, func(s *sim.Sim) { got <- s }) }()
+	select {
+	case s := <-got:
+		if n := len(s.Keys()); n != 15 {
+			t.Errorf("%d devices", n)
+		}
+	case err := <-done:
+		t.Fatal(err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("not ready")
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "shelly1pmg4-a8032ab10013") {
+		t.Errorf("output = %s", out.String())
 	}
 }

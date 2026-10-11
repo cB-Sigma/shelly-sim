@@ -78,6 +78,9 @@ type Device struct {
 	Battery *float64
 	// Gen2: Ws is the outbound WebSocket configuration (Ws.GetConfig).
 	Ws map[string]any
+	// CoverTravel is how long a Gen2+ cover takes from closed to open;
+	// zero moves it at once.
+	CoverTravel time.Duration
 }
 
 // Input1 is a Gen1 input: the last event (S, L, SS …) and a count that
@@ -102,6 +105,8 @@ type device struct {
 	// notified, never interleaved, so a reply never carries a state older
 	// than a notification sent before it.
 	wsMu sync.Mutex
+	x    *gen2Ext                  // scripts, schedules, webhooks, KVS, configuration changes
+	g1   map[string]map[string]any // Gen1 settings sections and actions
 }
 
 // STA is the Wi-Fi a device was told to join.
@@ -380,19 +385,28 @@ func (s *Sim) SetComponent(key, comp string, fields map[string]any) {
 		return
 	}
 	d.wsMu.Lock()
-	defer d.wsMu.Unlock()
 	s.mu.Lock()
 	c := d.cfg.Components[comp]
 	if c == nil {
 		c = map[string]any{}
 		d.cfg.Components[comp] = c
 	}
+	before := map[string]any{}
+	for k, v := range c {
+		before[k] = v
+	}
 	for k, v := range fields {
 		c[k] = v
+	}
+	after := map[string]any{}
+	for k, v := range c {
+		after[k] = v
 	}
 	s.mu.Unlock()
 	delta := map[string]any{comp: fields}
 	s.notifyLocked(d, "NotifyStatus", delta)
+	d.wsMu.Unlock()
+	s.changed(d, comp, before, after)
 }
 
 // Event sends a NotifyEvent for a component ("input:0", "single_push").
@@ -404,6 +418,9 @@ func (s *Sim) Event(key, comp, event string) {
 	id, _ := strconv.Atoi(comp[strings.Index(comp, ":")+1:])
 	ts := float64(time.Now().UnixMilli()) / 1000
 	s.notify(d, "NotifyEvent", map[string]any{"ts": ts, "events": []any{map[string]any{"component": comp, "id": id, "event": event, "ts": ts}}})
+	if h, ok := inputHook[event]; ok && strings.HasPrefix(comp, "input:") {
+		s.fire(d, h, id)
+	}
 }
 
 // Gen1 returns a copy of a Gen1 device's configuration and state.
@@ -452,7 +469,21 @@ func (s *Sim) notifyLocked(d *device, method string, params map[string]any) {
 		ts = append(ts, target{c, dst})
 	}
 	src := d.key()
+	var sinks []func(string, map[string]any)
+	if d.x != nil {
+		keys := make([]int, 0, len(d.x.sinks))
+		for k := range d.x.sinks {
+			keys = append(keys, k)
+		}
+		sort.Ints(keys)
+		for _, k := range keys {
+			sinks = append(sinks, d.x.sinks[k])
+		}
+	}
 	s.mu.Unlock()
+	for _, fn := range sinks {
+		fn(method, params)
+	}
 	for _, t := range ts {
 		b, _ := json.Marshal(map[string]any{"src": src, "dst": t.dst, "method": method, "params": params})
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -571,6 +602,10 @@ func (s *Sim) serveGen1(d *device, w http.ResponseWriter, r *http.Request) {
 	case "status":
 		writeJSON(w, 200, gen1Status(c))
 	case "settings":
+		if len(parts) >= 2 && (parts[1] == "actions" || len(parts) == 3) {
+			writeJSON(w, 200, gen1SettingsCall(d, parts[1:], q))
+			return
+		}
 		if len(parts) == 2 && parts[1] == "sta" {
 			if en := q.Get("enabled"); en != "" {
 				d.sta = STA{SSID: q.Get("ssid"), Password: q.Get("key"), Enabled: en == "1" || en == "true"}
@@ -852,15 +887,26 @@ func (s *Sim) call(d *device, method string, p map[string]any) (any, map[string]
 	set := func(key string, fields map[string]any) {
 		s.mu.Lock()
 		c := d.cfg.Components[key]
+		before := map[string]any{}
+		for k, v := range c {
+			before[k] = v
+		}
 		for k, v := range fields {
 			c[k] = v
+		}
+		after := map[string]any{}
+		for k, v := range c {
+			after[k] = v
 		}
 		s.mu.Unlock()
 		delta := map[string]any{"id": id}
 		for k, v := range fields {
 			delta[k] = v
 		}
-		go s.notify(d, "NotifyStatus", map[string]any{key: delta})
+		go func() {
+			s.notify(d, "NotifyStatus", map[string]any{key: delta})
+			s.changed(d, key, before, after)
+		}()
 	}
 	switch method {
 	case "Shelly.GetDeviceInfo":
@@ -886,28 +932,34 @@ func (s *Sim) call(d *device, method string, p map[string]any) (any, map[string]
 	case "Shelly.GetConfig":
 		return s.config(d), nil
 	case "Shelly.GetComponents":
-		// Only dynamic (virtual) components are listed on request; the
-		// simulated devices have none.
-		if dyn, _ := p["dynamic_only"].(bool); dyn {
-			return map[string]any{"components": []any{}, "cfg_rev": 1, "offset": 0, "total": 0}, nil
-		}
+		// Every component, or only the dynamic (virtual) ones, in pages
+		// of 20 from offset.
 		s.mu.Lock()
 		defer s.mu.Unlock()
+		dyn, _ := p["dynamic_only"].(bool)
 		cfg := s.configLocked(d)
+		x := d.ext()
 		keys := make([]string, 0, len(d.cfg.Components))
 		for key := range d.cfg.Components {
+			if _, virtual := x.virtual[key]; dyn && !virtual {
+				continue
+			}
 			keys = append(keys, key)
 		}
 		sort.Strings(keys)
+		off := 0
+		if o, ok := pnum(p, "offset"); ok {
+			off = min(int(o), len(keys))
+		}
 		list := []any{}
-		for _, key := range keys {
+		for _, key := range keys[off:min(off+20, len(keys))] {
 			b, _ := json.Marshal(d.cfg.Components[key])
 			var status map[string]any
 			_ = json.Unmarshal(b, &status)
 			list = append(list, map[string]any{"key": key, "status": status, "config": cfg[key]})
 		}
-		return map[string]any{"components": list, "cfg_rev": 1, "offset": 0, "total": len(list)}, nil
-	case "Switch.Set", "Switch.Toggle", "Light.Set", "Light.Toggle":
+		return map[string]any{"components": list, "cfg_rev": x.cfgRev, "offset": off, "total": len(keys)}, nil
+	case "Switch.Set", "Switch.Toggle", "Light.Set", "Light.Toggle", "RGB.Set", "RGB.Toggle", "RGBW.Set", "RGBW.Toggle", "CCT.Set", "CCT.Toggle":
 		typ := strings.ToLower(method[:strings.Index(method, ".")])
 		key, c, e := comp(typ)
 		if e != nil {
@@ -919,7 +971,7 @@ func (s *Sim) call(d *device, method string, p map[string]any) (any, map[string]
 		on := !was
 		if strings.HasSuffix(method, ".Set") {
 			v, ok := p["on"].(bool)
-			if !ok && p["brightness"] == nil {
+			if !ok && p["brightness"] == nil && p["rgb"] == nil && p["white"] == nil && p["ct"] == nil {
 				return nil, rpcError(-103, "Missing required argument 'on'!")
 			}
 			on = v || (!ok && was)
@@ -933,6 +985,30 @@ func (s *Sim) call(d *device, method string, p map[string]any) (any, map[string]
 				return nil, rpcError(-103, "Invalid argument 'brightness'")
 			}
 			fields["brightness"] = b
+		}
+		if v, has := p["rgb"]; has {
+			l, ok := v.([]any)
+			if !ok || len(l) != 3 {
+				return nil, rpcError(-103, "Invalid argument 'rgb'")
+			}
+			for _, x := range l {
+				if f, ok := x.(float64); !ok || f < 0 || f > 255 {
+					return nil, rpcError(-103, "Invalid argument 'rgb'")
+				}
+			}
+			fields["rgb"] = l
+		}
+		if w, ok := pnum(p, "white"); ok {
+			if w < 0 || w > 255 {
+				return nil, rpcError(-103, "Invalid argument 'white'")
+			}
+			fields["white"] = w
+		}
+		if ct, ok := pnum(p, "ct"); ok {
+			if ct < 2700 || ct > 6500 {
+				return nil, rpcError(-103, "Invalid argument 'ct'")
+			}
+			fields["ct"] = ct
 		}
 		set(key, fields)
 		return map[string]any{"was_on": was}, nil
@@ -977,21 +1053,30 @@ func (s *Sim) call(d *device, method string, p map[string]any) (any, map[string]
 		if e != nil {
 			return nil, e
 		}
+		// set's notifications run in the background; a timed move's steps
+		// call it from their own goroutine.
+		syncSet := func(k string, fields map[string]any) {
+			set(k, fields)
+		}
 		switch method {
 		case "Cover.Open":
-			set(key, map[string]any{"state": "open", "current_pos": 100.0})
+			s.moveCover(d, key, id, 100, syncSet)
 		case "Cover.Close":
-			set(key, map[string]any{"state": "closed", "current_pos": 0.0})
+			s.moveCover(d, key, id, 0, syncSet)
 		case "Cover.Stop":
-			set(key, map[string]any{"state": "stopped"})
+			s.stopCover(d, key)
+			set(key, map[string]any{"state": "stopped", "target_pos": nil})
 		default:
 			pos, ok := pnum(p, "pos")
 			if !ok || pos < 0 || pos > 100 {
 				return nil, rpcError(-103, "Invalid argument 'pos'")
 			}
-			set(key, map[string]any{"state": "stopped", "current_pos": pos})
+			s.moveCover(d, key, id, pos, syncSet)
 		}
 		return nil, nil
+	}
+	if res, e, ok := s.callMore(d, method, p); ok {
+		return res, e
 	}
 	// <Component>.GetStatus: one component's status ("Cover.GetStatus"
 	// with an id, "Sys.GetStatus" without).
@@ -1023,33 +1108,6 @@ func (s *Sim) config(d *device) map[string]any {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.configLocked(d)
-}
-
-func (s *Sim) configLocked(d *device) map[string]any {
-	c := d.cfg
-	var name any
-	if c.Name != "" {
-		name = c.Name
-	}
-	out := map[string]any{}
-	for key := range c.Components {
-		cfg := map[string]any{}
-		if _, n, ok := strings.Cut(key, ":"); ok {
-			id, _ := strconv.Atoi(n)
-			cfg["id"], cfg["name"] = id, nil
-		}
-		out[key] = cfg
-	}
-	out["sys"] = map[string]any{"device": map[string]any{"name": name, "mac": c.MAC, "fw_id": "20241011-114455/" + c.FW + "-g8ab4e4a", "discoverable": true},
-		"location": map[string]any{"tz": "Asia/Kolkata"}, "cfg_rev": 1}
-	if c.Ws != nil {
-		ws := map[string]any{}
-		for k, v := range c.Ws {
-			ws[k] = v
-		}
-		out["ws"] = ws
-	}
-	return out
 }
 
 // ---- Gen2 WebSocket ------------------------------------------------------------

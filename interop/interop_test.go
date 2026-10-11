@@ -318,3 +318,41 @@ func TestGen2(t *testing.T) {
 		t.Error("the wrong passwords were not seen")
 	}
 }
+
+// v0.2.0 additions through aioshelly: Shelly.ListMethods (its script
+// support check), scripts, KVS, virtual components with GetComponents,
+// schedules and webhooks through call_rpc, per-component configuration,
+// a Gen3 and a Gen4 device, a Pro 3EM, and a cover with a travel time
+// whose NotifyStatus frames aioshelly follows to closed.
+func TestGen2More(t *testing.T) {
+	needPeer(t)
+	s := sim.NewHost(listenHost())
+	defer s.Close()
+	const sw, cover = "shellyplus1pm-a8032ab1e101", "shellyplus2pm-a8032ab1e102"
+	s.Add(sim.Device{Gen: 2, ID: sw, MAC: "A8032AB1E101", Model: "SNSW-001P16EU", App: "Plus1PM", FW: "1.4.4", Name: "Pump", Password: "pw-more",
+		Components: map[string]map[string]any{"switch:0": {"id": 0.0, "output": false, "apower": 0.0}, "sys": {"uptime": 5.0}}})
+	s.Add(sim.Device{Gen: 2, ID: cover, MAC: "A8032AB1E102", Model: "SNSW-102P16EU", App: "Plus2PM", FW: "1.4.4", CoverTravel: 2 * time.Second,
+		Components: map[string]map[string]any{"cover:0": {"id": 0.0, "state": "open", "current_pos": 100.0}, "sys": {"uptime": 7.0}}})
+	g3 := s.Add(sim.Device{Gen: 3, ID: "shelly1pmg3-a8032ab1e103", MAC: "A8032AB1E103", Model: "S3SW-001P16EU", App: "S1PMG3", FW: "1.4.4",
+		Components: map[string]map[string]any{"switch:0": {"id": 0.0, "output": false, "apower": 0.0}, "sys": {"uptime": 1.0}}})
+	g4 := s.Add(sim.Device{Gen: 4, ID: "shelly1pmg4-a8032ab1e104", MAC: "A8032AB1E104", Model: "S4SW-001P16EU", App: "S1PMG4", FW: "1.6.1",
+		Components: map[string]map[string]any{"switch:0": {"id": 0.0, "output": false, "apower": 0.0}, "sys": {"uptime": 1.0}}})
+	em := s.Add(sim.Device{Gen: 2, ID: "shellypro3em-a8032ab1e105", MAC: "A8032AB1E105", Model: "SPEM-003CEBEU", App: "Pro3EM", FW: "1.4.4",
+		Components: map[string]map[string]any{"em:0": {"id": 0.0, "a_act_power": 905.2, "b_act_power": 480.1, "c_act_power": 190.0, "total_act_power": 1575.3},
+			"emdata:0": {"id": 0.0, "total_act": 317630.7}, "sys": {"uptime": 9.0}}})
+	got := peer(t, nil, "gen2more", "--host", "host.docker.internal", "--password", "pw-more", "--ws-port", wsPort,
+		"--switch", port(t, s.Addr(sw))+",A8032AB1E101", "--cover", port(t, s.Addr(cover))+",A8032AB1E102",
+		"--gen3", port(t, g3)+",A8032AB1E103", "--gen4", port(t, g4)+",A8032AB1E104", "--meter", port(t, em)+",A8032AB1E105")
+	want(t, got, "more_initialize", "more_switch_config", "more_supports_scripts", "more_script_create", "more_script_list", "more_script_putcode",
+		"more_script_getcode", "more_script_start", "more_script_eval", "more_script_eval_result", "more_script_stop", "more_kvs_set", "more_kvs_get",
+		"more_kvs_value", "more_virtual_add", "more_number_set", "more_dynamic_components", "more_dynamic_status", "more_number_range",
+		"more_schedule_create", "more_schedule_list", "more_schedule_listed", "more_webhook_create", "more_webhook_id",
+		"more_gen3_initialize", "more_gen3_gen", "more_gen3_switch", "more_gen4_initialize", "more_gen4_gen", "more_gen4_switch",
+		"more_em_initialize", "more_em_values", "more_cover_initialize", "more_cover_close", "more_cover_timed")
+	if code, _ := s.ScriptCode(sw, 1); !strings.HasPrefix(code, "// sigma interop") {
+		t.Errorf("script code %q", code)
+	}
+	if v := s.KVS(sw)["sigma"]; v == nil {
+		t.Error("KVS entry missing")
+	}
+}

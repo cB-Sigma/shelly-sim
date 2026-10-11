@@ -247,9 +247,111 @@ async def gen2(a):
     await asyncio.sleep(0.2)
 
 
+async def gen2more(a):
+    """v0.2.0 additions: method list, scripts, KVS, virtual components,
+    per-component configuration, a Gen3 and a Gen4 device, energy meters,
+    a timed cover's notifications."""
+    ws_server = WsServer()
+    await ws_server.initialize(a.ws_port)
+    async with aiohttp.ClientSession() as session:
+        sw_port, sw_mac = port_mac(a.switch)
+        dev = await RpcDevice.create(session, ws_server, ConnectionOptions(a.host, "admin", a.password, port=sw_port, device_mac=sw_mac))
+        updates = []
+        dev.subscribe_updates(lambda _d, kind: updates.append(kind))
+        if await expect("more_initialize", dev.initialize) is None and not dev.initialized:
+            return
+        report("more_switch_config", dev.config.get("switch:0", {}).get("in_mode") == "follow" and "wifi" in dev.config and "mqtt" in dev.config,
+               json.dumps(dev.config.get("switch:0")))
+        await expect("more_supports_scripts", dev.supports_scripts, lambda r: f"supports={r}")
+        await expect("more_script_create", lambda: dev.script_create("sigma"))
+        scripts = await expect("more_script_list", dev.script_list, lambda r: json.dumps(r))
+        sid = scripts[0]["id"] if scripts else 1
+        code = "// sigma interop\n" + "let n = 0; // ünï\n" * 200
+        await expect("more_script_putcode", lambda: dev.script_putcode(sid, code))
+        got, offset = "", 0
+        for _ in range(20):
+            page = await dev.script_getcode(sid, offset)
+            got += page["data"]
+            offset = len(got.encode())
+            if page["left"] == 0:
+                break
+        report("more_script_getcode", got == code, f"{len(got)} of {len(code)} characters")
+        await expect("more_script_start", lambda: dev.script_start(sid))
+        res = await expect("more_script_eval", lambda: dev.script_eval(sid, "40 + 2"), lambda r: json.dumps(r))
+        report("more_script_eval_result", res is not None and res.get("result") == "42", json.dumps(res))
+        await expect("more_script_stop", lambda: dev.script_stop(sid))
+        await expect("more_kvs_set", lambda: dev.kvs_set("sigma", {"mode": "eco", "n": 3}))
+        kv = await expect("more_kvs_get", lambda: dev.kvs_get("sigma"), lambda r: json.dumps(r))
+        report("more_kvs_value", kv is not None and kv.get("value") == {"mode": "eco", "n": 3}, json.dumps(kv))
+        added = await expect("more_virtual_add", lambda: dev.call_rpc("Virtual.Add", {"type": "number", "config": {"name": "Setpoint", "min": 10, "max": 30}}),
+                             lambda r: json.dumps(r))
+        vid = (added or {}).get("id", 200)
+        await expect("more_number_set", lambda: dev.number_set(vid, 22.5))
+        await expect("more_dynamic_components", dev.get_dynamic_components)
+        report("more_dynamic_status", dev.status.get(f"number:{vid}", {}).get("value") == 22.5 and dev.config.get(f"number:{vid}", {}).get("name") == "Setpoint",
+               f"status={dev.status.get(f'number:{vid}')} config={dev.config.get(f'number:{vid}')}")
+        try:
+            await dev.number_set(vid, 99)
+            report("more_number_range", False, "accepted 99")
+        except RpcCallError as err:
+            report("more_number_range", err.code == -103, f"code={err.code}")
+        job = await expect("more_schedule_create", lambda: dev.call_rpc("Schedule.Create", {"enable": True, "timespec": "0 0 7 * * *",
+                           "calls": [{"method": "Switch.Set", "params": {"id": 0, "on": True}}]}), lambda r: json.dumps(r))
+        jobs = await expect("more_schedule_list", lambda: dev.call_rpc("Schedule.List"), lambda r: json.dumps(r))
+        report("more_schedule_listed", jobs is not None and job is not None and jobs["jobs"][0]["id"] == job["id"], json.dumps(jobs))
+        hook = await expect("more_webhook_create", lambda: dev.call_rpc("Webhook.Create", {"cid": 0, "enable": True, "event": "switch.on",
+                            "urls": ["http://192.0.2.1/x"]}), lambda r: json.dumps(r))
+        report("more_webhook_id", hook is not None and hook.get("id") == 1, json.dumps(hook))
+        await dev.shutdown()
+
+        for name, spec in (("gen3", a.gen3), ("gen4", a.gen4)):
+            port, mac = port_mac(spec)
+            d = await RpcDevice.create(session, ws_server, ConnectionOptions(a.host, port=port, device_mac=mac))
+            if await expect(f"more_{name}_initialize", d.initialize) is not None or d.initialized:
+                report(f"more_{name}_gen", d.gen == int(name[-1]) and "switch:0" in d.status, f"gen={d.gen} model={d.model}")
+                await expect(f"more_{name}_switch", lambda: d.switch_set(0, True))
+            await d.shutdown()
+
+        port, mac = port_mac(a.meter)
+        em = await RpcDevice.create(session, ws_server, ConnectionOptions(a.host, port=port, device_mac=mac))
+        if await expect("more_em_initialize", em.initialize) is not None or em.initialized:
+            e = em.status.get("em:0", {})
+            report("more_em_values", e.get("total_act_power") == 1575.3 and "emdata:0" in em.status, json.dumps(e)[:200])
+        await em.shutdown()
+
+        port, mac = port_mac(a.cover)
+        cov = await RpcDevice.create(session, ws_server, ConnectionOptions(a.host, port=port, device_mac=mac))
+        states = []
+        done = asyncio.Event()
+
+        def on_cover(_d, kind):
+            if kind == RpcUpdateType.STATUS:
+                st = cov.status.get("cover:0", {}).get("state")
+                if not states or states[-1] != st:
+                    states.append(st)
+                if st == "closed":
+                    done.set()
+
+        cov.subscribe_updates(on_cover)
+        if await expect("more_cover_initialize", cov.initialize) is not None or cov.initialized:
+            await expect("more_cover_close", lambda: cov.cover_close(0))
+            try:
+                await asyncio.wait_for(done.wait(), 10)
+            except TimeoutError:
+                pass
+            report("more_cover_timed", "closing" in states and states[-1] == "closed" and cov.status["cover:0"].get("current_pos") == 0,
+                   f"states={states} pos={cov.status['cover:0'].get('current_pos')}")
+        await cov.shutdown()
+    ws_server.close()
+    await asyncio.sleep(0.2)
+
+
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("mode", choices=["gen1", "gen2"])
+    p.add_argument("mode", choices=["gen1", "gen2", "gen2more"])
+    p.add_argument("--gen3")
+    p.add_argument("--gen4")
+    p.add_argument("--meter")
     p.add_argument("--host", required=True)
     p.add_argument("--password", default="")
     p.add_argument("--relay")
@@ -262,7 +364,7 @@ def main():
     p.add_argument("--server-ip", default="127.0.0.1")
     a = p.parse_args()
     try:
-        asyncio.run(gen1(a) if a.mode == "gen1" else gen2(a))
+        asyncio.run({"gen1": gen1, "gen2": gen2, "gen2more": gen2more}[a.mode](a))
     except Exception as err:  # noqa: BLE001
         report("run", False, f"{type(err).__name__}: {err}\n{traceback.format_exc()}")
     sys.exit(1 if FAILED else 0)

@@ -17,13 +17,23 @@ double of its Shelly integration.
 | Feature | Status |
 |---|---|
 | GET /shelly for both generations | yes |
+| Gen1 settings sections (/settings/relay/n, /settings/light/n, ...: values kept and answered) and /settings/actions (slots by name, URLs as given) | yes (v0.2.0) |
 | Gen1 HTTP: /status, /settings (with the light mode), /settings/sta, /relay, /light, /color, /roller, /ota, /reboot, /cit/d; basic authentication | yes |
 | Gen2+ JSON-RPC over HTTP (POST /rpc) with SHA-256 digest; Shelly.GetDeviceInfo without authentication | yes |
 | Gen2+ JSON-RPC over WebSocket (ws://host/rpc) with the authentication object; NotifyStatus on changes, NotifyEvent on demand | yes |
-| Gen2+ methods | Shelly.GetDeviceInfo, GetStatus, GetConfig, GetComponents, Update (by URL or stage), Reboot; Switch.Set and Toggle, Light.Set and Toggle, Cover.Open, Close, Stop, GoToPosition; `<Component>.GetStatus`; Ws.GetConfig and SetConfig; WiFi.SetConfig. Others answer -114 |
+| Gen2+ methods | Shelly.GetDeviceInfo, GetStatus, GetConfig, GetComponents (pages, dynamic only), ListMethods, Update (by URL or stage), Reboot; Switch, Light, RGB, RGBW and CCT Set and Toggle; Cover.Open, Close, Stop, GoToPosition; `<Component>.GetStatus`, `GetConfig`, `SetConfig` (Sys, WiFi, Cloud, MQTT, BLE too), `ResetCounters`; Input.Trigger; Ws.GetConfig and SetConfig; WiFi.SetConfig. Others answer -114 |
+| Configuration | per component, in the shape devices answer (in_mode, initial_state, limits, auto on/off, night mode...), plus sys, wifi, cloud, mqtt and ble; changes kept, cfg_rev counted, restart_required for mqtt, ble and cloud |
+| Scripts | Script.Create, List, PutCode (append), GetCode (pages by byte offset, whole characters), Start, Stop, Eval, GetStatus, GetConfig, SetConfig, Delete; limits of 10 scripts and 20 kB. There is no script engine: Eval answers a number, a quoted string or a sum, anything else `undefined` |
+| Schedules | Schedule.Create, Update, List, Delete, DeleteAll with timespec checks and schedule_rev; `RunSchedule` runs a job's calls when a test asks (no clock) |
+| Webhooks | Webhook.ListSupported (events of the device's components), Create, Update, List, Delete, DeleteAll; called with HTTP GET on switch, light, cover and input changes and on input push events (`Hooks` records the URLs). URL tokens are not expanded |
+| KVS | KVS.Set (etag check), Get, GetMany (pages of 10, offset and total), List, Delete; key and value size limits; kvs_rev |
+| Virtual components | Virtual.Add and Delete for boolean, number (min, max), text (max_len), enum (options), group and button; `<Type>.Set` with checks and NotifyStatus |
+| Covers with a travel time | `Device.CoverTravel`: opening and closing with the position every 200 ms, target_pos, Stop where it is; zero keeps the instant move |
 | Gen1 CoIoT status messages, with a /cit/d description of relays, lights, inputs and the device's sensors | yes, sent when the test asks (`SendCoIoT`) |
-| Gen1 MQTT: the topics a device publishes, relay commands | yes, as values and calls (no broker) |
-| Gen2+ JSON-RPC as over MQTT | yes, as a call (`RPC`; no broker) |
+| Gen1 MQTT: the topics a device publishes, relay commands | yes, as values and calls, and on a real broker (`ConnectMQTT`: announce, state topics, relay commands, `<prefix>/command` announce) |
+| Gen2+ JSON-RPC over MQTT | yes, as a call (`RPC`) and on a real broker (`ConnectMQTT`: `<id>/online`, `<id>/rpc` answered to `<src>/rpc`, `<id>/events/rpc`, optional `<id>/status/<component>`); a small MQTT 3.1.1 client of its own, no MQTT dependency |
+| DNS-SD records (`_shelly._tcp` with gen, app, ver; `_http._tcp`) | yes, as data (`Services`) to hand to an mDNS responder; the interop module announces them with cB-Sigma/mdns |
+| Device kinds | `NewDemo` (six, as before) and `NewFullDemo` (fifteen: also a 1PM Gen3, a Plug S Gen3, a 1PM Gen4, a Pro 3EM, a PM Mini Gen3, an EM Gen3, a Plus i4, a Plus RGBW PM and a cover with a 15 s travel) |
 | Outbound WebSocket of a sleeping Gen2+ device: NotifyFullStatus, then changes | yes (`DialOutbound`) |
 | BLE RPC as a GATT peer (length and data characteristics, 20-octet chunks) | yes (`BLE`) |
 | Wi-Fi setup and firmware updates | yes; an update installs the version `SetUpdate` offers |
@@ -43,11 +53,18 @@ behaviour:
   /cit/d.
 - The WebSocket nonce is the current Unix time; HTTP nonces are random
   and stay valid for the device's life.
-- Shelly.GetConfig gives only `id` and `name` per component, the device
-  name and MAC under `sys` and the outbound WebSocket under `ws`.
-  Shelly.GetComponents lists no dynamic (virtual) components.
-- A firmware update installs 100 ms after it is asked for. A roller or
-  cover reaches its position at once.
+- Shelly.GetConfig gives the common fields of each component in factory
+  state with the simulator's own defaults (a 60 s cover travel, limits of
+  a 16 A relay), not one model's.
+- A firmware update installs 100 ms after it is asked for. A Gen1 roller,
+  and a Gen2+ cover without `CoverTravel`, reaches its position at once.
+- Webhooks are called once per change, with no repeat period, condition
+  or time window applied, and URL tokens such as `${ev}` are sent as
+  written. Schedules run only through `RunSchedule`.
+- KVS etags are the simulator's own hashes; real devices use another
+  form. Script.Eval does not run code (see Scripts above).
+- `Services` gives each device's port; real devices announce port 80 on
+  their own address.
 - A device without `sys` in its components has none in its status; real
   devices always have it, so configure one when a client expects it.
 
@@ -69,6 +86,8 @@ go run github.com/cB-Sigma/shelly-sim/cmd/shellysim@latest -coiot 127.0.0.1:5683
 |---|---|---|
 | `-coiot` | (none) | UDP host:port to send the Gen1 devices' CoIoT status messages to |
 | `-interval` | 10s | how often the CoIoT messages are sent |
+| `-all` | false | serve `sim.NewFullDemo`'s fifteen devices instead of six |
+| `-mqtt` | (none) | MQTT broker host:port every device connects to in MQTT mode |
 
 It serves the six devices of `sim.NewDemo` and prints one line per
 device, with ports chosen freely on each run:
@@ -129,9 +148,9 @@ reqs := s.Requests() // "<id> Switch.Set {...}", "<mac> /relay/0?turn=on"
 
 | Package | What it does |
 |---|---|
-| `sim` | `Sim` with `New`, `NewHost`, `NewDemo`, `Add`; device state and pushes (`SetComponent`, `Event`, `SetGen1`, `Press1`, `SendCoIoT`, `Gen1Topics`, `MQTTCommand`, `RPC`, `DialOutbound`, `BLE`); faults; counters and records (`Calls`, `Requests`, `AuthFailures`, `WSClients`, `WiFi`, `UpdateURL`, `Reboots`, `WsConfig`) |
+| `sim` | `Sim` with `New`, `NewHost`, `NewDemo`, `NewFullDemo`, `Add`; device state and pushes (`SetComponent`, `Event`, `SetGen1`, `Press1`, `SendCoIoT`, `Gen1Topics`, `MQTTCommand`, `RPC`, `ConnectMQTT`, `DialOutbound`, `BLE`, `RunSchedule`); `Services` (DNS-SD records); faults; counters and records (`Calls`, `Requests`, `AuthFailures`, `WSClients`, `WiFi`, `UpdateURL`, `Reboots`, `WsConfig`, `Hooks`, `KVS`, `ScriptCode`) |
 | `cmd/shellysim` | Serves the six demo devices, optionally sending CoIoT messages |
-| `interop` (nested module, tests only) | aioshelly against the simulator, in Docker |
+| `interop` (nested module, tests only) | aioshelly against the simulator, in Docker; the DNS-SD records announced and browsed over multicast with cB-Sigma/mdns (needs Go 1.27.1, which mdns requires; the sim itself stays on Go 1.24) |
 
 Changes per version are in [CHANGELOG.md](CHANGELOG.md).
 
@@ -143,8 +162,12 @@ go test -race ./...
 
 The tests cover the simulator itself, the command, and the shelly
 client's requests, digest and basic authentication, the WebSocket
-channel, the outbound WebSocket, CoIoT, MQTT, BLE RPC, Wi-Fi setup and
-firmware updates against the simulator.
+channel, the outbound WebSocket, CoIoT, MQTT (also over an embedded
+broker), BLE RPC, Wi-Fi setup and firmware updates against the
+simulator, and for v0.2.0 the typed views and calls, scripts,
+schedules, webhooks firing to a test server, KVS, virtual components,
+timed covers, counters, the fifteen-device demo and discovery through
+`Services`.
 
 `interop/` is a nested module with its own go.mod. Its tests run
 aioshelly in a Python container and are skipped unless
@@ -173,9 +196,33 @@ cd interop && SIGMA_SHELLY_INTEROP=1 go test -v -timeout 20m ./...
   WebSocket to aioshelly's server. The run found a WebSocket
   authentication bug and missing answers in the simulator, fixed in
   v0.1.0 (CHANGELOG.md, PROVENANCE.md).
+- aioshelly 13.34.1 against the v0.2.0 additions (`TestGen2More`,
+  2026-10-11, python:3.12.10-slim): all 35 checks passed, after the run
+  found a deadlock (Number.Set over WebSocket notified while the asking
+  channel still held the device's notification order; fixed). Checked:
+  Shelly.ListMethods as aioshelly's script-support test, a script
+  created, uploaded (3.6 kB with non-ASCII characters), read back page by
+  page, started, evaluated and stopped; KVS set and get of a JSON object;
+  Virtual.Add of a number, Number.Set within and outside its range, and
+  the dynamic component read back through aioshelly's paging of
+  Shelly.GetComponents; Schedule.Create and List and Webhook.Create
+  through call_rpc; switch configuration fields; a Gen3 and a Gen4 device
+  initialised and switched; a Pro 3EM's readings; a cover with a 2 s
+  travel followed through closing to closed by NotifyStatus.
+  The earlier Gen1 and Gen2 runs were repeated on the same day and image
+  and passed.
+- Multicast DNS-SD (`TestMDNSAnnounceAndDiscover` in `interop`): the
+  demo devices' `Services` announced by github.com/cB-Sigma/mdns and
+  found by the shelly module's `discover.MDNS` over that module's
+  browser, on a test port on the loopback interface.
+- MQTT on a real broker: this module's tests connect devices to an
+  embedded mochi-mqtt v2.7.9 broker and drive them with the shelly
+  client's `MQTT` type.
 - The [shelly](https://github.com/cB-Sigma/shelly) client, in this
   module's tests (written by the same author, so not independent).
-- Not yet: a comparison with a real device.
+- Not yet, needing hardware: a comparison with a real device's answers
+  (configuration defaults, etags, script engine, webhook timing, cover
+  timing).
 
 ## Demo values
 

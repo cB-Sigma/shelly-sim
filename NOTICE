@@ -29,6 +29,15 @@ Dependencies
   Coder): the simulated devices' WebSocket channels.
 - github.com/cB-Sigma/shelly (the Shelly local API client; Copyright 2026
   Abhinav Gautam, Apache-2.0). Used by the tests only.
+- github.com/mochi-mqtt/server/v2 v2.7.9 (MIT, Copyright (c) 2023
+  Mochi-MQTT Organisation), with its dependencies rs/xid (MIT),
+  gorilla/websocket (BSD-2-Clause) and gopkg.in/yaml.v3 (MIT and
+  Apache-2.0): an embedded MQTT broker in the tests only. The simulator's
+  own MQTT client (sim/mqtt.go) is written for this module from the MQTT
+  3.1.1 specification (facts only).
+- The interop module also uses github.com/cB-Sigma/mdns (Apache-2.0,
+  Copyright 2026 Abhinav Gautam) to announce and browse the devices'
+  DNS-SD records.
 
 Interop test peer (interop/, not part of the module's packages)
 ---------------------------------------------------------------

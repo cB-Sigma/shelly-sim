@@ -15,6 +15,9 @@
 // Gen2 devices answer GET /shelly, POST /rpc and ws://…/rpc; Gen1 devices
 // the Gen1 HTTP API. With -coiot host:port the Gen1 devices send their
 // CoIoT status message there every -interval, as real ones multicast it.
+// With -all it also serves sim.NewFullDemo's Gen3, Gen4, metering,
+// input, RGBW and timed cover devices; with -mqtt host:port every device
+// connects to that MQTT broker in MQTT mode.
 package main
 
 import (
@@ -51,6 +54,8 @@ func run(ctx context.Context, args []string, out io.Writer, ready func(*sim.Sim)
 	fs.SetOutput(out)
 	coiot := fs.String("coiot", "", "UDP host:port to send the Gen1 devices' CoIoT status messages to (empty: none)")
 	interval := fs.Duration("interval", 10*time.Second, "how often CoIoT messages are sent")
+	all := fs.Bool("all", false, "also serve the Gen3, Gen4, energy meter, input, RGBW and timed cover demo devices")
+	broker := fs.String("mqtt", "", "MQTT broker host:port the devices connect to in MQTT mode (empty: none)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -66,6 +71,9 @@ func run(ctx context.Context, args []string, out io.Writer, ready func(*sim.Sim)
 		}
 	}
 	s := sim.NewDemo()
+	if *all {
+		s = sim.NewFullDemo()
+	}
 	defer s.Close()
 	var gen1 []string
 	for _, k := range s.Keys() {
@@ -73,6 +81,16 @@ func run(ctx context.Context, args []string, out io.Writer, ready func(*sim.Sim)
 		if len(k) == 12 { // a Gen1 device's key is its MAC
 			gen1 = append(gen1, k)
 		}
+	}
+	if *broker != "" {
+		for _, k := range s.Keys() {
+			disconnect, err := s.ConnectMQTT(k, *broker, sim.MQTTOptions{})
+			if err != nil {
+				return fmt.Errorf("-mqtt: %s: %w", k, err)
+			}
+			defer disconnect()
+		}
+		fmt.Fprintf(out, "shellysim: devices in MQTT mode on %s\n", *broker)
 	}
 	if ready != nil {
 		ready(s)

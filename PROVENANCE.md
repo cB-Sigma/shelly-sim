@@ -23,6 +23,15 @@ History:
 - 2026-10-06: moved into the shelly module as `sim` and `cmd/shellysim`.
 - 2026-10-11: moved into this module of its own, with the tests of the
   shelly client that drive it, and checked against aioshelly (below).
+- 2026-10-11 (v0.2.0): configuration, scripts, schedules, webhooks, KVS,
+  virtual components, counters, timed covers and the method list
+  (`sim/gen2more.go`); MQTT mode on a broker with an MQTT 3.1.1 client of
+  our own (`sim/mqtt.go`); the fifteen-device demo and DNS-SD records
+  (`sim/demo.go`). Model codes and app names of the Gen3 and Gen4
+  devices come from Shelly's device documents and Home Assistant's
+  fixtures (facts only). How aioshelly reads scripts (pages by byte
+  offset) and decides script support (Shelly.ListMethods) was read from
+  its source, then checked by running it.
 
 ## Sources
 
@@ -33,6 +42,9 @@ History:
 | WebSocket channel (sim/sim.go) | Gen2+ docs: RPC over WebSocket, the authentication object, NotifyStatus and NotifyEvent |
 | CoIoT, MQTT, outbound WebSocket (sim/push.go) | Gen1 docs: CoIoT v2, MQTT topics; Gen2+ docs: MQTT channel, the Ws component; RFC 7252 |
 | BLE RPC (sim/sim.go) | Gen2+ docs: BLE RPC service and characteristics |
+| Configuration and the rest of the RPC API (sim/gen2more.go) | Gen2+ docs: component configurations, Script, Schedule, Webhook, KVS, Virtual and virtual component types, ResetCounters, Input.Trigger, Shelly.ListMethods |
+| MQTT client (sim/mqtt.go) | OASIS MQTT 3.1.1: CONNECT with a will, SUBSCRIBE, PUBLISH at QoS 0 and 1, PUBACK, PINGREQ, DISCONNECT; Gen2+ docs: MQTT channel topics |
+| DNS-SD records (sim/demo.go) | Gen2+ docs: the mDNS service and its TXT keys; RFC 6763 |
 
 ## Independent verification
 
@@ -76,6 +88,18 @@ Found and fixed (each with a regression test in `sim/sim_test.go` or
   (`TestSetupCallsOfOtherClients`).
 - Devices could listen only on 127.0.0.1; `NewHost` takes another address
   (`TestNewHost`).
+
+v0.2.0, run on 2026-10-11 in the same image: the Gen1 and Gen2 runs
+again (all passed), and `TestGen2More`, 35 checks of aioshelly's script,
+KVS, virtual and dynamic component calls, schedules and webhooks through
+call_rpc, configuration, Gen3 and Gen4 devices, a Pro 3EM and a timed
+cover (all passed after one fix). Found and fixed: a virtual
+component's Set over WebSocket deadlocked, since the change was notified
+while the asking channel still held the device's notification order
+(`TestVirtualSetOverWebSocket`). Also run: the devices' DNS-SD records
+announced and browsed over multicast with github.com/cB-Sigma/mdns
+(`TestMDNSAnnounceAndDiscover`), and MQTT mode against an embedded
+mochi-mqtt broker (`TestMQTTOverBroker`).
 
 Not done: a comparison with a real device.
 
