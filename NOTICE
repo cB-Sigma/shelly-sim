@@ -1,0 +1,50 @@
+shelly-sim (simulated Shelly devices on their local APIs, in Go)
+Copyright 2026 Abhinav Gautam
+
+This module is licensed under the Apache License, Version 2.0 (LICENSE).
+
+The code was written for SigmaM2M, a oneM2M platform, from Shelly's public
+API documentation (PROVENANCE.md). It contains no code from other
+projects. sim/sim.go and sim/push.go come from SigmaM2M and carry no
+per-file copyright header, the convention of the code they come from;
+the copyright line above covers them. Files added for this module carry
+"Copyright 2026 Abhinav Gautam" and "SPDX-License-Identifier: Apache-2.0".
+
+Shelly is a trademark of Shelly Group. This module is not made, endorsed
+or supported by Shelly Group or its subsidiaries; the name is used only
+to say which devices it simulates.
+
+Facts from other works
+----------------------
+
+Shelly's API documentation (shelly-api-docs.shelly.cloud), IETF RFC 7252
+(CoAP framing) and RFC 7616 (HTTP digest with SHA-256). Facts only; no
+documentation text is reproduced.
+
+Dependencies
+------------
+
+- The Go standard library (BSD-3-Clause, Copyright The Go Authors).
+- github.com/coder/websocket v1.8.15 (ISC licence, Copyright (c) 2025
+  Coder): the simulated devices' WebSocket channels.
+- github.com/cB-Sigma/shelly (the Shelly local API client; Copyright 2026
+  Abhinav Gautam, Apache-2.0). Used by the tests only.
+
+Interop test peer (interop/, not part of the module's packages)
+---------------------------------------------------------------
+
+The nested test-only module interop/ installs aioshelly 13.34.1
+(github.com/home-assistant-libs/aioshelly, Apache-2.0, Copyright the
+aioshelly contributors) from PyPI, with its dependencies (among them
+aiohttp, Apache-2.0), in a python:3.12.10-slim container on the tester's
+machine, and runs our own script interop/testdata/aioshelly_peer.py
+(Apache-2.0) with it. No aioshelly code is included in this repository.
+
+Test data
+---------
+
+Every device id, MAC address, name, password, Wi-Fi network, firmware
+version, reading, address and URL in the simulator, the tests and
+cmd/shellysim is a made-up demo value. Model and type codes are real
+model names, chosen to exercise each code path. There are no keys or
+credentials.

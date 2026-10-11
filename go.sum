@@ -1,0 +1,4 @@
+github.com/cB-Sigma/shelly v0.1.0 h1:hVu209IMISyioJpsXWWqmZsj2C+t9r4Dm7ZpM+qPGI4=
+github.com/cB-Sigma/shelly v0.1.0/go.mod h1:pJFGQDoN+gKFD3zMhTMBL2Rg6IB0xhq4ebj+7TEStiI=
+github.com/coder/websocket v1.8.15 h1:6B2JPeOGlpff2Uz6vOEH1Vzpi0iUz20A+lPVhPHtNUA=
+github.com/coder/websocket v1.8.15/go.mod h1:NX3SzP+inril6yawo5CQXx8+fk145lPDC6pumgx0mVg=
