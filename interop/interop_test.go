@@ -27,6 +27,7 @@ import (
 const (
 	image            = "python:3.12.10-slim"
 	aioshellyPackage = "aioshelly==13.34.1"
+	bthomePackage    = "bthome-ble==3.24.0"
 	wsPort           = "8123" // aioshelly's server for outbound WebSockets, in the container
 )
 
@@ -79,7 +80,7 @@ func needPeer(t *testing.T) string {
 			return
 		}
 		out, err = exec.Command("docker", "exec", peerName, "pip", "install", "--no-cache-dir",
-			"--disable-pip-version-check", "--root-user-action=ignore", aioshellyPackage).CombinedOutput()
+			"--disable-pip-version-check", "--root-user-action=ignore", aioshellyPackage, bthomePackage).CombinedOutput()
 		if err != nil {
 			peerErr = fmt.Errorf("pip install %s: %v: %s", aioshellyPackage, err, out)
 		}

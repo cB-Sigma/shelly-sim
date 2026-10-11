@@ -3,6 +3,36 @@
 All notable changes to this module. Versions follow semantic versioning;
 before v1 the API may change in minor versions.
 
+## v0.3.0 (2026-10-12)
+
+Needs github.com/cB-Sigma/shelly v0.3.0 (its `bthome` package). The API
+only grows.
+
+### Added
+
+- Webhook URL tokens are replaced before the call: `${ev.<attr>}`,
+  `${status["<component>"].<field>}` and `${config...}`, null when a
+  token does not resolve. Webhook.ListSupported names the attributes of
+  temperature.change and humidity.change, which are now raised when
+  tC or rh change.
+- Gen1 action URLs are called: out_on_url and out_off_url when a relay
+  changes, shortpush_url and longpush_url on `Press1`; `Report1` makes a
+  sensor call its report_url with hum, temp, batV and id.
+- Bluetooth: the BTHome component (BTHome.GetStatus, AddDevice with a
+  key, DeleteDevice with its sensors, AddSensor, DeleteSensor,
+  StartDeviceDiscovery with device_discovered and discovery_done events,
+  GetObjectInfos, ResetEncryptionCounter; BTHomeDevice.GetKnownObjects;
+  status, configuration and SetConfig of bthomedevice and bthomesensor
+  components). `Hear` feeds a device an advertisement: a BTHomeDevice for
+  the sender decodes it (with its key; replays dropped; decrypt_failed,
+  key_missing_or_bad and parse_failed reported), updates battery, RSSI,
+  packet id and firmware, updates its sensors, and raises button and
+  dimmer events (single_push, ..., rotate_left) with their webhooks and
+  bthomesensor value_change and state_change webhooks; running scripts
+  that relay advertisements emit them as `ble.scan_result` events.
+- Interop: aioshelly installs its relay script and reads the relayed
+  advertisements, decoded by bthome-ble 3.24.0 (`TestBLE`).
+
 ## v0.2.0 (2026-10-11)
 
 Needs github.com/cB-Sigma/shelly v0.2.0 for its tests. The API only
@@ -24,6 +54,7 @@ grows.
   over a small MQTT 3.1.1 client of the module's own.
 - `NewFullDemo` (Gen3, Gen4, energy meters, inputs, RGBW, timed cover);
   `NewDemo` is unchanged. `Services`: each device's DNS-SD records.
+- Gen1 /settings/<section>/<n> (values kept) and /settings/actions.
 - Command: `-all` and `-mqtt`.
 - Interop: aioshelly against the additions (`TestGen2More`), and
   announcing and discovering over multicast with cB-Sigma/mdns.

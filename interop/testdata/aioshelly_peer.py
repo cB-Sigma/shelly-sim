@@ -9,6 +9,10 @@
 #
 #   python -I aioshelly_peer.py gen1 --host H --relay PORT,MAC --dimmer PORT,MAC --rgbw PORT,MAC --password PW
 #   python -I aioshelly_peer.py gen2 --host H --switch PORT,MAC --cover PORT,MAC --password PW --ws-port N
+#   python -I aioshelly_peer.py ble --host H --switch PORT,MAC --blu ADDR --ws-port N
+#
+# The ble mode also uses bthome-ble (MIT, installed from PyPI) to decode
+# the BTHome data the simulated device relays.
 #
 # aioshelly reaches Gen1 devices on port 80 only, so each Gen1 device gets a
 # loopback address of the container (127.0.0.2, ...) with a TCP forwarder on
@@ -18,6 +22,7 @@ import argparse
 import asyncio
 import json
 import sys
+import time
 import traceback
 
 import aiohttp
@@ -346,9 +351,110 @@ async def gen2more(a):
     await asyncio.sleep(0.2)
 
 
+def split_ad(data):
+    """Split advertising data into (type, bytes) pairs."""
+    out, i = [], 0
+    while i < len(data) and data[i]:
+        n = data[i]
+        out.append((data[i + 1], bytes(data[i + 2:i + 1 + n])))
+        i += 1 + n
+    return out
+
+
+class ServiceInfo:
+    """The fields of a Bluetooth service info that bthome-ble reads."""
+
+    def __init__(self, mac, service_data):
+        self.name = mac
+        self.address = mac
+        self.rssi = -60
+        self.manufacturer_data = {}
+        self.service_data = service_data
+        self.service_uuids = list(service_data)
+        self.source = "sigma"
+        self.time = time.monotonic()
+        self.connectable = False
+        self.tx_power = None
+        self.raw = None
+        self.device = None
+        self.advertisement = None
+
+
+async def ble(a):
+    """v0.3.0: aioshelly installs its Bluetooth relay script on a simulated
+    Gen3 device and reads the ble.scan_result events the device then
+    sends; the relayed BTHome data is decoded by bthome-ble and the Shelly
+    manufacturer data by aioshelly; the BTHome component is driven through
+    call_rpc and followed in aioshelly's status."""
+    from aioshelly.ble import async_ensure_ble_enabled, async_start_scanner
+    from aioshelly.ble.manufacturer_data import parse_shelly_manufacturer_data
+    from aioshelly.ble.parser import parse_ble_scan_result_event
+    from bthome_ble import BTHomeBluetoothDeviceData
+
+    port, mac = port_mac(a.switch)
+    ws_server = WsServer()
+    await ws_server.initialize(a.ws_port)
+    async with aiohttp.ClientSession() as session:
+        dev = await RpcDevice.create(session, ws_server, ConnectionOptions(a.host, port=port, device_mac=mac))
+        events = []
+        got = asyncio.Event()
+        changed = asyncio.Event()
+
+        def on_update(d, kind):
+            if kind == RpcUpdateType.EVENT:
+                for e in (d.event or {}).get("events", []):
+                    events.append(e)
+                    if e.get("event") == "ble.scan_result":
+                        got.set()
+            if kind == RpcUpdateType.STATUS and (d.status.get("bthomesensor:200") or {}).get("value") is True:
+                changed.set()
+
+        dev.subscribe_updates(on_update)
+        if await expect("ble_initialize", dev.initialize) is None and not dev.initialized:
+            return
+        await expect("ble_ensure_enabled", lambda: async_ensure_ble_enabled(dev), lambda r: f"restarted={r}")
+        await expect("ble_start_scanner", lambda: async_start_scanner(dev, False, "ble.scan_result", 2))
+        scripts = await dev.script_list()
+        report("ble_script_running", any(s.get("name") == "aioshelly_ble_integration" and s.get("running") for s in scripts), json.dumps(scripts))
+        await expect("ble_bthome_add_device", lambda: dev.call_rpc("BTHome.AddDevice", {"config": {"addr": a.blu, "name": "Door"}}), json.dumps)
+        await expect("ble_bthome_add_sensor", lambda: dev.call_rpc("BTHome.AddSensor", {"config": {"addr": a.blu, "obj_id": 45, "idx": 0}}), json.dumps)
+        print(json.dumps({"check": "waiting_for_adverts", "ok": True, "detail": ""}), flush=True)
+        try:
+            await asyncio.wait_for(got.wait(), 10)
+        except TimeoutError:
+            report("ble_scan_result_event", False, f"no ble.scan_result event; events={events}")
+            return
+        ev = next(e for e in events if e.get("event") == "ble.scan_result")
+        report("ble_scan_result_event", ev.get("component", "").startswith("script:"), json.dumps(ev)[:300])
+        advs = parse_ble_scan_result_event(ev["data"])
+        report("ble_scan_result_parsed", len(advs) == 1 and advs[0][0] == a.blu.upper() and advs[0][1] == -61, str(advs)[:300])
+        addr, _rssi, data = advs[0]
+        ads = split_ad(data)
+        sd = {0xFCD2: b for t, b in ads if t == 0x16 and b[:2] == b"\xd2\xfc"}
+        mf = {int.from_bytes(b[:2], "little"): b[2:] for t, b in ads if t == 0xFF}
+        m = parse_shelly_manufacturer_data(mf) or {}
+        report("ble_shelly_mfdata", m.get("model_id") == 2 and m.get("flags") == 0x19 and m.get("mac") == a.blu.upper(), json.dumps(m))
+        p = BTHomeBluetoothDeviceData()
+        upd = p.update(ServiceInfo(addr, {"0000fcd2-0000-1000-8000-00805f9b34fb": sd.get(0xFCD2, b"")[2:]}))
+        sensors = {k.key: v.native_value for k, v in upd.entity_values.items()}
+        binary = {k.key: v.native_value for k, v in upd.binary_entity_values.items()}
+        report("ble_bthome_decoded", sensors.get("battery") == 87 and sensors.get("illuminance") == 140.5 and binary.get("window") is True,
+               json.dumps({"sensors": {k: str(v) for k, v in sensors.items()}, "binary": binary}))
+        try:
+            await asyncio.wait_for(changed.wait(), 10)
+            report("ble_bthome_sensor_status", True, json.dumps(dev.status.get("bthomesensor:200")))
+        except TimeoutError:
+            report("ble_bthome_sensor_status", False, json.dumps(dev.status.get("bthomesensor:200")))
+        report("ble_bthome_device_status", (dev.status.get("bthomedevice:200") or {}).get("battery") == 87, json.dumps(dev.status.get("bthomedevice:200")))
+        await dev.shutdown()
+    ws_server.close()
+    await asyncio.sleep(0.2)
+
+
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("mode", choices=["gen1", "gen2", "gen2more"])
+    p.add_argument("mode", choices=["gen1", "gen2", "gen2more", "ble"])
+    p.add_argument("--blu", default="3c:2e:f5:71:d5:2a")
     p.add_argument("--gen3")
     p.add_argument("--gen4")
     p.add_argument("--meter")
@@ -364,7 +470,7 @@ def main():
     p.add_argument("--server-ip", default="127.0.0.1")
     a = p.parse_args()
     try:
-        asyncio.run({"gen1": gen1, "gen2": gen2, "gen2more": gen2more}[a.mode](a))
+        asyncio.run({"gen1": gen1, "gen2": gen2, "gen2more": gen2more, "ble": ble}[a.mode](a))
     except Exception as err:  # noqa: BLE001
         report("run", False, f"{type(err).__name__}: {err}\n{traceback.format_exc()}")
     sys.exit(1 if FAILED else 0)

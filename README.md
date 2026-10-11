@@ -25,7 +25,9 @@ double of its Shelly integration.
 | Configuration | per component, in the shape devices answer (in_mode, initial_state, limits, auto on/off, night mode...), plus sys, wifi, cloud, mqtt and ble; changes kept, cfg_rev counted, restart_required for mqtt, ble and cloud |
 | Scripts | Script.Create, List, PutCode (append), GetCode (pages by byte offset, whole characters), Start, Stop, Eval, GetStatus, GetConfig, SetConfig, Delete; limits of 10 scripts and 20 kB. There is no script engine: Eval answers a number, a quoted string or a sum, anything else `undefined` |
 | Schedules | Schedule.Create, Update, List, Delete, DeleteAll with timespec checks and schedule_rev; `RunSchedule` runs a job's calls when a test asks (no clock) |
-| Webhooks | Webhook.ListSupported (events of the device's components), Create, Update, List, Delete, DeleteAll; called with HTTP GET on switch, light, cover and input changes and on input push events (`Hooks` records the URLs). URL tokens are not expanded |
+| Webhooks | Webhook.ListSupported (events of the device's components), Create, Update, List, Delete, DeleteAll; called with HTTP GET on switch, light, cover and input changes, input push events, temperature and humidity changes and BTHome events (`Hooks` records the URLs); `${ev...}`, `${status...}` and `${config...}` URL tokens replaced (v0.3.0) |
+| Gen1 action URLs | out_on_url, out_off_url, shortpush_url, longpush_url called; a sensor's report_url with hum, temp, batV, id (`Report1`) (v0.3.0) |
+| Bluetooth (v0.3.0) | the BTHome component: BTHome.* (devices with keys, sensors, discovery events, object information), BTHomeDevice.GetKnownObjects, bthomedevice and bthomesensor status and configuration; `Hear` feeds an advertisement: decoded for a BTHomeDevice (encrypted or not, replays dropped), sensors updated, button and dimmer events and their webhooks; relay scripts emit `ble.scan_result` events. There is no radio and no script engine: a running script whose code names `ble.scan_result` counts as a relay |
 | KVS | KVS.Set (etag check), Get, GetMany (pages of 10, offset and total), List, Delete; key and value size limits; kvs_rev |
 | Virtual components | Virtual.Add and Delete for boolean, number (min, max), text (max_len), enum (options), group and button; `<Type>.Set` with checks and NotifyStatus |
 | Covers with a travel time | `Device.CoverTravel`: opening and closing with the position every 200 ms, target_pos, Stop where it is; zero keeps the instant move |
@@ -148,7 +150,7 @@ reqs := s.Requests() // "<id> Switch.Set {...}", "<mac> /relay/0?turn=on"
 
 | Package | What it does |
 |---|---|
-| `sim` | `Sim` with `New`, `NewHost`, `NewDemo`, `NewFullDemo`, `Add`; device state and pushes (`SetComponent`, `Event`, `SetGen1`, `Press1`, `SendCoIoT`, `Gen1Topics`, `MQTTCommand`, `RPC`, `ConnectMQTT`, `DialOutbound`, `BLE`, `RunSchedule`); `Services` (DNS-SD records); faults; counters and records (`Calls`, `Requests`, `AuthFailures`, `WSClients`, `WiFi`, `UpdateURL`, `Reboots`, `WsConfig`, `Hooks`, `KVS`, `ScriptCode`) |
+| `sim` | `Sim` with `New`, `NewHost`, `NewDemo`, `NewFullDemo`, `Add`; device state and pushes (`SetComponent`, `Event`, `SetGen1`, `Press1`, `SendCoIoT`, `Gen1Topics`, `MQTTCommand`, `RPC`, `ConnectMQTT`, `DialOutbound`, `BLE`, `RunSchedule`, `Hear`, `Report1`); `Services` (DNS-SD records); faults; counters and records (`Calls`, `Requests`, `AuthFailures`, `WSClients`, `WiFi`, `UpdateURL`, `Reboots`, `WsConfig`, `Hooks`, `KVS`, `ScriptCode`) |
 | `cmd/shellysim` | Serves the six demo devices, optionally sending CoIoT messages |
 | `interop` (nested module, tests only) | aioshelly against the simulator, in Docker; the DNS-SD records announced and browsed over multicast with cB-Sigma/mdns (needs Go 1.27.1, which mdns requires; the sim itself stays on Go 1.24) |
 
@@ -211,6 +213,19 @@ cd interop && SIGMA_SHELLY_INTEROP=1 go test -v -timeout 20m ./...
   travel followed through closing to closed by NotifyStatus.
   The earlier Gen1 and Gen2 runs were repeated on the same day and image
   and passed.
+- aioshelly 13.34.1 with bthome-ble 3.24.0 against the v0.3.0 Bluetooth
+  additions (`TestBLE`, 2026-10-12, python:3.12.10-slim): all 12 checks
+  passed. aioshelly checked Bluetooth was on, installed and started its
+  own relay script (`async_start_scanner`), added a BTHomeDevice and a
+  BTHomeSensor through `call_rpc`; the simulated Gen3 device then heard
+  a BLU door sensor's advertisement and sent it as a `ble.scan_result`
+  event, which aioshelly parsed (address, RSSI, data) and whose Shelly
+  manufacturer data it read (flags, model id, MAC); bthome-ble decoded the
+  relayed BTHome data (battery, illuminance, window), and aioshelly's
+  status followed the BTHomeSensor and BTHomeDevice values. The whole
+  aioshelly suite was rerun the same day and passed. The simulator
+  decodes BTHome with the library's `bthome` package, which is checked
+  against bthome-ble on its own (the library's interop).
 - Multicast DNS-SD (`TestMDNSAnnounceAndDiscover` in `interop`): the
   demo devices' `Services` announced by github.com/cB-Sigma/mdns and
   found by the shelly module's `discover.MDNS` over that module's
@@ -222,7 +237,8 @@ cd interop && SIGMA_SHELLY_INTEROP=1 go test -v -timeout 20m ./...
   module's tests (written by the same author, so not independent).
 - Not yet, needing hardware: a comparison with a real device's answers
   (configuration defaults, etags, script engine, webhook timing, cover
-  timing).
+  timing, BTHome component answers and event timing of a real Gen2+
+  device with BLU sensors).
 
 ## Demo values
 

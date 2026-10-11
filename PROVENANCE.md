@@ -32,6 +32,15 @@ History:
   fixtures (facts only). How aioshelly reads scripts (pages by byte
   offset) and decides script support (Shelly.ListMethods) was read from
   its source, then checked by running it.
+- 2026-10-12 (v0.3.0): webhook URL tokens and Gen1 action and report URLs
+  (`sim/hooks.go`), the BTHome component and `Hear` (`sim/bthome.go`).
+  Facts from Shelly's Webhook, BTHome, BTHomeDevice and BTHomeSensor
+  pages and the Gen1 action documents; the `ble.scan_result` event form
+  from aioshelly 13.34.1. BTHome packets are decoded with the shelly
+  module's `bthome` package (shared code with the library; that package
+  is checked against bthome-ble separately). Checked by running aioshelly
+  and bthome-ble against it (`TestBLE`, 12 checks, all passed on the
+  first run).
 
 ## Sources
 

@@ -629,6 +629,7 @@ func (s *Sim) serveGen1(d *device, w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Bad relay index", 400)
 			return
 		}
+		was := c.Relays[idx].On
 		switch q.Get("turn") {
 		case "on":
 			c.Relays[idx].On = true
@@ -640,6 +641,9 @@ func (s *Sim) serveGen1(d *device, w http.ResponseWriter, r *http.Request) {
 		default:
 			http.Error(w, "Bad turn!", 400)
 			return
+		}
+		if was != c.Relays[idx].On {
+			s.action1Locked(d, map[bool]string{true: "out_on_url", false: "out_off_url"}[c.Relays[idx].On], idx, nil)
 		}
 		writeJSON(w, 200, map[string]any{"ison": c.Relays[idx].On, "has_timer": false})
 	case "light":

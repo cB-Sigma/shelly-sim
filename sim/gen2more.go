@@ -44,6 +44,7 @@ type gen2Ext struct {
 	hookCalls  []string                  // webhook URLs called, in order
 	sinks      map[int]func(method string, params map[string]any)
 	nextSink   int
+	blu        *bluState // Bluetooth: BTHome devices and what was heard
 }
 
 type script struct {
@@ -321,6 +322,9 @@ func (s *Sim) callMore(d *device, method string, p map[string]any) (res any, rpc
 	switch {
 	case method == "Shelly.ListMethods":
 		return map[string]any{"methods": s.methods(d)}, nil, true
+	case ns == "BTHome" || method == "BTHomeDevice.GetKnownObjects":
+		r, e := s.bthomeCall(d, method, p)
+		return r, e, true
 	case op == "GetConfig" && typ != "shelly" && typ != "ws":
 		s.mu.Lock()
 		cfg, ok := s.configLocked(d)[key].(map[string]any)
@@ -387,7 +391,9 @@ func (s *Sim) methods(d *device) []string {
 		"Script.List", "Script.Create", "Script.PutCode", "Script.GetCode", "Script.Start", "Script.Stop", "Script.Delete", "Script.Eval",
 		"Script.GetStatus", "Script.GetConfig", "Script.SetConfig", "Schedule.Create", "Schedule.Update", "Schedule.List", "Schedule.Delete",
 		"Schedule.DeleteAll", "Webhook.ListSupported", "Webhook.Create", "Webhook.Update", "Webhook.List", "Webhook.Delete", "Webhook.DeleteAll",
-		"KVS.Set", "KVS.Get", "KVS.GetMany", "KVS.List", "KVS.Delete", "Virtual.Add", "Virtual.Delete"} {
+		"KVS.Set", "KVS.Get", "KVS.GetMany", "KVS.List", "KVS.Delete", "Virtual.Add", "Virtual.Delete",
+		"BTHome.GetConfig", "BTHome.SetConfig", "BTHome.GetStatus", "BTHome.AddDevice", "BTHome.DeleteDevice", "BTHome.AddSensor",
+		"BTHome.DeleteSensor", "BTHome.StartDeviceDiscovery", "BTHome.GetObjectInfos", "BTHome.ResetEncryptionCounter"} {
 		set[m] = true
 	}
 	s.mu.Lock()
@@ -398,7 +404,8 @@ func (s *Sim) methods(d *device) []string {
 		}
 		ns := map[string]string{"switch": "Switch", "cover": "Cover", "light": "Light", "rgb": "RGB", "rgbw": "RGBW", "cct": "CCT", "input": "Input",
 			"em": "EM", "emdata": "EMData", "em1": "EM1", "em1data": "EM1Data", "pm1": "PM1", "temperature": "Temperature", "humidity": "Humidity",
-			"devicepower": "DevicePower", "boolean": "Boolean", "number": "Number", "text": "Text", "enum": "Enum", "button": "Button", "group": "Group"}[typ]
+			"devicepower": "DevicePower", "boolean": "Boolean", "number": "Number", "text": "Text", "enum": "Enum", "button": "Button", "group": "Group",
+			"bthomedevice": "BTHomeDevice", "bthomesensor": "BTHomeSensor"}[typ]
 		if ns == "" {
 			continue
 		}
@@ -414,6 +421,8 @@ func (s *Sim) methods(d *device) []string {
 			}
 		case "input":
 			set["Input.Trigger"], set["Input.ResetCounters"] = true, true
+		case "bthomedevice":
+			set["BTHomeDevice.GetKnownObjects"] = true
 		case "emdata", "em1data", "pm1":
 			set[ns+".ResetCounters"] = true
 		case "boolean", "number", "text", "enum", "button":
@@ -683,6 +692,12 @@ func supportedEvents(d *device) []string {
 			out = append(out, "temperature.change")
 		case "humidity":
 			out = append(out, "humidity.change")
+		case "bthomedevice":
+			for _, e := range bthomeDeviceEvents {
+				out = append(out, "bthomedevice."+e)
+			}
+		case "bthomesensor":
+			out = append(out, "bthomesensor.value_change", "bthomesensor.state_change")
 		}
 	}
 	sort.Strings(out)
@@ -739,7 +754,11 @@ func (s *Sim) webhookCall(d *device, op string, p map[string]any) (any, map[stri
 	case "ListSupported":
 		types := map[string]any{}
 		for _, e := range supportedEvents(d) {
-			types[e] = map[string]any{}
+			t := map[string]any{}
+			if a, ok := eventAttrs[e]; ok {
+				t["attrs"] = a
+			}
+			types[e] = t
 		}
 		return map[string]any{"types": types}, nil
 	case "Create":
@@ -806,7 +825,11 @@ var hookHTTP = &http.Client{Timeout: 3 * time.Second}
 
 // fire calls the URLs of the enabled webhooks for event on component id
 // (s.mu not held), in the background as a device does.
-func (s *Sim) fire(d *device, event string, cid int) {
+func (s *Sim) fire(d *device, event string, cid int) { s.fireEv(d, event, cid, nil) }
+
+// fireEv is fire with the event's attributes, which ${ev.<name>} tokens
+// in the URLs are replaced with (as are ${status...} and ${config...}).
+func (s *Sim) fireEv(d *device, event string, cid int, ev map[string]any) {
 	s.mu.Lock()
 	if d.x == nil {
 		s.mu.Unlock()
@@ -821,7 +844,7 @@ func (s *Sim) fire(d *device, event string, cid int) {
 		list, _ := h["urls"].([]any)
 		for _, u := range list {
 			if us, ok := u.(string); ok && us != "" {
-				urls = append(urls, us)
+				urls = append(urls, s.expandTokensLocked(d, us, ev))
 			}
 		}
 	}
@@ -857,6 +880,12 @@ func (s *Sim) changed(d *device, key string, before, after map[string]any) {
 		if st, has := after["state"].(bool); has && before["state"] != after["state"] {
 			s.fire(d, "input.toggle_"+map[bool]string{true: "on", false: "off"}[st], id)
 		}
+	}
+	if typ == "temperature" && before["tC"] != after["tC"] {
+		s.fireEv(d, "temperature.change", id, map[string]any{"tC": after["tC"], "tF": after["tF"]})
+	}
+	if typ == "humidity" && before["rh"] != after["rh"] {
+		s.fireEv(d, "humidity.change", id, map[string]any{"rh": after["rh"]})
 	}
 }
 

@@ -142,6 +142,12 @@ func (s *Sim) Press1(key string, input int, event string) {
 	in := &d.cfg.Inputs[input]
 	in.Event = event
 	in.Cnt++
+	switch event {
+	case "S":
+		s.action1Locked(d, "shortpush_url", input, nil)
+	case "L":
+		s.action1Locked(d, "longpush_url", input, nil)
+	}
 }
 
 // Gen1Topics are the MQTT messages a Gen1 device publishes for its state

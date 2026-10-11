@@ -48,6 +48,9 @@ aioshelly contributors) from PyPI, with its dependencies (among them
 aiohttp, Apache-2.0), in a python:3.12.10-slim container on the tester's
 machine, and runs our own script interop/testdata/aioshelly_peer.py
 (Apache-2.0) with it. No aioshelly code is included in this repository.
+Since v0.3.0 it also installs bthome-ble 3.24.0
+(github.com/Bluetooth-Devices/bthome-ble, MIT, Copyright (c) 2022 Ernst
+Klamer) to decode relayed advertisements; none of its code is kept here.
 
 Test data
 ---------

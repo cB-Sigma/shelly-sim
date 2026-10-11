@@ -9,7 +9,7 @@ replace github.com/cB-Sigma/shelly-sim => ../
 
 require (
 	github.com/cB-Sigma/mdns v0.2.0
-	github.com/cB-Sigma/shelly v0.2.0
+	github.com/cB-Sigma/shelly v0.3.0
 	github.com/cB-Sigma/shelly-sim v0.0.0
 )
 
